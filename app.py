@@ -1,11 +1,12 @@
-import base64
+import io
 import urllib.parse
 
-import requests
+import numpy as np
 import streamlit as st
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+from rembg import remove
 
 
-# CONFIGURAÇÃO DA PÁGINA
 st.set_page_config(
     page_title="Roma Estofaria - Simulador",
     page_icon="🛋️",
@@ -13,36 +14,28 @@ st.set_page_config(
 )
 
 
-# ESTILO VISUAL
+# Aparência do site
 st.markdown(
     """
     <style>
         .stApp {
             background-color: #111111;
-            color: #ffffff;
+            color: white;
         }
 
         h1, h2, h3 {
             color: #d4af37 !important;
         }
 
-        .stButton > button {
-            width: 100%;
-            background-color: #d4af37;
-            color: #111111;
-            border: none;
-            font-weight: bold;
-            padding: 12px;
-            border-radius: 8px;
-        }
-
+        .stButton > button,
         .stDownloadButton > button {
             width: 100%;
             background-color: #d4af37;
             color: #111111;
             border: none;
-            font-weight: bold;
             border-radius: 8px;
+            padding: 12px;
+            font-weight: bold;
         }
     </style>
     """,
@@ -54,215 +47,208 @@ st.title("Roma Estofaria")
 st.subheader("Simulador Virtual de Reforma")
 
 st.write(
-    "Envie a foto do estofado e uma fotografia do tecido que deseja aplicar."
+    "Envie a fotografia do estofado e depois a fotografia do tecido."
 )
 
 
-# UPLOAD DAS IMAGENS
+# Recebimento das imagens
 foto_sofa = st.file_uploader(
-    "1. Envie a foto do sofá, poltrona ou estofado:",
+    "1. Envie a foto do sofá, poltrona ou puff:",
     type=["jpg", "jpeg", "png"],
-    key="foto_sofa"
+    key="sofa"
 )
 
 foto_tecido = st.file_uploader(
-    "2. Envie a foto do tecido escolhido:",
+    "2. Envie uma foto aproximada do tecido:",
     type=["jpg", "jpeg", "png"],
-    key="foto_tecido"
+    key="tecido"
 )
 
 
-# ESCOLHA DO MATERIAL
-tipo_material = st.selectbox(
-    "3. Escolha o tipo de material:",
+material = st.selectbox(
+    "3. Escolha o material:",
     ["Suede", "Bouclé", "Linho", "Sintético", "Outro"]
 )
 
-cor_material = st.text_input(
-    "4. Informe a cor:",
-    placeholder="Exemplo: areia, preto, cinza-claro ou caramelo"
+intensidade = st.slider(
+    "Intensidade da aplicação:",
+    min_value=40,
+    max_value=100,
+    value=85,
+    step=5
 )
 
 
-# MOSTRAR AS DUAS IMAGENS
+def preparar_imagem(arquivo):
+    imagem = Image.open(arquivo)
+    imagem = ImageOps.exif_transpose(imagem)
+    imagem = imagem.convert("RGB")
+
+    # Limita o tamanho para não pesar no Streamlit
+    imagem.thumbnail((1400, 1400), Image.Resampling.LANCZOS)
+
+    return imagem
+
+
+def criar_textura_repetida(textura, tamanho):
+    largura, altura = tamanho
+
+    textura = textura.convert("RGB")
+    textura = ImageEnhance.Color(textura).enhance(1.08)
+    textura = ImageEnhance.Contrast(textura).enhance(1.08)
+
+    largura_bloco = max(220, largura // 3)
+
+    proporcao = largura_bloco / textura.width
+    altura_bloco = max(1, int(textura.height * proporcao))
+
+    bloco = textura.resize(
+        (largura_bloco, altura_bloco),
+        Image.Resampling.LANCZOS
+    )
+
+    resultado = Image.new("RGB", (largura, altura))
+
+    for y in range(0, altura, bloco.height):
+        for x in range(0, largura, bloco.width):
+            resultado.paste(bloco, (x, y))
+
+    return resultado
+
+
+def aplicar_tecido(imagem_original, imagem_tecido, intensidade_aplicacao):
+    largura, altura = imagem_original.size
+
+    # Recorta automaticamente o objeto principal
+    imagem_rgba = remove(imagem_original).convert("RGBA")
+    mascara = imagem_rgba.getchannel("A")
+
+    # Suaviza as bordas do recorte
+    mascara = mascara.filter(ImageFilter.GaussianBlur(radius=1.2))
+
+    textura = criar_textura_repetida(
+        imagem_tecido,
+        (largura, altura)
+    )
+
+    original_np = np.asarray(imagem_original).astype(np.float32) / 255.0
+    textura_np = np.asarray(textura).astype(np.float32) / 255.0
+
+    # Calcula luminosidade original para preservar sombras e volumes
+    luminosidade = (
+        original_np[:, :, 0] * 0.299
+        + original_np[:, :, 1] * 0.587
+        + original_np[:, :, 2] * 0.114
+    )
+
+    imagem_cinza = Image.fromarray(
+        np.uint8(np.clip(luminosidade * 255, 0, 255))
+    )
+
+    # Descobre os detalhes finos: dobras, botões e costuras
+    imagem_suave = imagem_cinza.filter(
+        ImageFilter.GaussianBlur(radius=8)
+    )
+
+    cinza_np = np.asarray(imagem_cinza).astype(np.float32) + 1
+    suave_np = np.asarray(imagem_suave).astype(np.float32) + 1
+
+    detalhes = np.clip(cinza_np / suave_np, 0.70, 1.30)
+
+    # Mantém as sombras, mas evita que tecidos claros fiquem escuros demais
+    sombra = np.clip(0.55 + luminosidade * 0.70, 0.40, 1.15)
+    sombra = sombra * detalhes
+
+    tecido_aplicado = textura_np * sombra[:, :, None]
+    tecido_aplicado = np.clip(tecido_aplicado, 0, 1)
+
+    intensidade_decimal = intensidade_aplicacao / 100
+
+    # Mistura parte da foto original para preservar costuras
+    simulacao_np = (
+        tecido_aplicado * intensidade_decimal
+        + original_np * (1 - intensidade_decimal)
+    )
+
+    simulacao_np = np.uint8(
+        np.clip(simulacao_np * 255, 0, 255)
+    )
+
+    simulacao = Image.fromarray(simulacao_np).convert("RGB")
+
+    # Aplica somente na área identificada como móvel
+    resultado = imagem_original.copy()
+    resultado.paste(simulacao, (0, 0), mascara)
+
+    return resultado
+
+
 if foto_sofa is not None and foto_tecido is not None:
+    imagem_sofa = preparar_imagem(foto_sofa)
+    imagem_tecido = preparar_imagem(foto_tecido)
+
     coluna1, coluna2 = st.columns(2)
 
     with coluna1:
         st.image(
-            foto_sofa,
+            imagem_sofa,
             caption="Estofado original",
             use_container_width=True
         )
 
     with coluna2:
         st.image(
-            foto_tecido,
+            imagem_tecido,
             caption="Tecido escolhido",
             use_container_width=True
         )
 
-
-# FUNÇÃO QUE ENVIA AS IMAGENS PARA A IA
-def gerar_simulacao(imagem_sofa, imagem_tecido, material, cor):
-    api_key = st.secrets.get("OPENAI_API_KEY")
-
-    if not api_key:
-        raise ValueError(
-            "A chave OPENAI_API_KEY ainda não foi configurada no Streamlit."
-        )
-
-    imagem_sofa.seek(0)
-    imagem_tecido.seek(0)
-
-    tipo_sofa = imagem_sofa.type or "image/jpeg"
-    tipo_tecido = imagem_tecido.type or "image/jpeg"
-
-    arquivos = [
-        (
-            "image[]",
-            (
-                imagem_sofa.name,
-                imagem_sofa.getvalue(),
-                tipo_sofa
-            )
-        ),
-        (
-            "image[]",
-            (
-                imagem_tecido.name,
-                imagem_tecido.getvalue(),
-                tipo_tecido
-            )
-        )
-    ]
-
-    prompt = f"""
-A primeira imagem mostra o estofado original do cliente.
-A segunda imagem mostra a referência exata do tecido.
-
-Produza uma simulação fotográfica realista da reforma do estofado da
-primeira imagem, aplicando o material {material}, na cor {cor}.
-
-A segunda imagem deve ser usada como referência fiel de cor, textura,
-trama, brilho e acabamento.
-
-Regras obrigatórias:
-
-1. Manter exatamente o modelo original do estofado.
-2. Não alterar formato, proporções, tamanho ou perspectiva.
-3. Manter a quantidade e a posição dos módulos.
-4. Manter braços, assentos, encostos, almofadas e pés.
-5. Preservar as costuras e divisões originais.
-6. Não criar debrum nem costura dupla onde não existe.
-7. Não modificar paredes, piso, objetos ou iluminação do ambiente.
-8. Alterar somente o revestimento estofado.
-9. Preservar sombras, dobras, volumes e iluminação natural.
-10. Não adicionar textos, preços, pessoas ou objetos.
-11. O resultado deve parecer uma fotografia verdadeira de um serviço
-concluído pela Roma Estofaria.
-"""
-
-    dados = {
-        "model": "gpt-image-2",
-        "prompt": prompt,
-        "quality": "medium",
-        "size": "auto",
-        "input_fidelity": "high",
-        "output_format": "jpeg",
-        "output_compression": "90"
-    }
-
-    cabecalho = {
-        "Authorization": f"Bearer {api_key}"
-    }
-
-    resposta = requests.post(
-        "https://api.openai.com/v1/images/edits",
-        headers=cabecalho,
-        data=dados,
-        files=arquivos,
-        timeout=180
-    )
-
-    if resposta.status_code != 200:
+    if st.button("Gerar simulação gratuita", type="primary"):
         try:
-            erro = resposta.json()
-            mensagem = erro.get("error", {}).get(
-                "message",
-                "Não foi possível gerar a simulação."
-            )
-        except Exception:
-            mensagem = resposta.text
+            with st.spinner(
+                "Identificando o móvel e aplicando o tecido..."
+            ):
+                resultado = aplicar_tecido(
+                    imagem_sofa,
+                    imagem_tecido,
+                    intensidade
+                )
 
-        raise RuntimeError(mensagem)
+                arquivo_resultado = io.BytesIO()
+                resultado.save(
+                    arquivo_resultado,
+                    format="JPEG",
+                    quality=92
+                )
 
-    resultado = resposta.json()
+                st.session_state["resultado"] = (
+                    arquivo_resultado.getvalue()
+                )
 
-    if not resultado.get("data"):
-        raise RuntimeError("A inteligência artificial não devolveu uma imagem.")
+            st.success("Simulação concluída!")
 
-    imagem_base64 = resultado["data"][0]["b64_json"]
-    return base64.b64decode(imagem_base64)
-
-
-# BOTÃO PARA GERAR
-pode_gerar = (
-    foto_sofa is not None
-    and foto_tecido is not None
-    and cor_material.strip() != ""
-)
-
-if st.button(
-    "Gerar simulação da reforma",
-    type="primary",
-    disabled=not pode_gerar
-):
-    try:
-        with st.spinner(
-            "Aplicando o tecido ao estofado. Isso pode levar até dois minutos..."
-        ):
-            resultado_imagem = gerar_simulacao(
-                foto_sofa,
-                foto_tecido,
-                tipo_material,
-                cor_material
+        except Exception as erro:
+            st.error(
+                "Não foi possível processar esta imagem. "
+                f"Detalhes: {erro}"
             )
 
-        st.session_state["resultado_imagem"] = resultado_imagem
-        st.success("Simulação concluída!")
 
-    except Exception as erro:
-        st.error(f"Não foi possível gerar a simulação: {erro}")
-
-
-# MOSTRAR O RESULTADO
-if "resultado_imagem" in st.session_state:
-    resultado = st.session_state["resultado_imagem"]
+if "resultado" in st.session_state:
+    resultado_bytes = st.session_state["resultado"]
 
     st.markdown("---")
-    st.subheader("Resultado da reforma")
+    st.subheader("Resultado da simulação")
 
-    coluna_antes, coluna_depois = st.columns(2)
-
-    with coluna_antes:
-        foto_sofa.seek(0)
-        st.image(
-            foto_sofa,
-            caption="Antes",
-            use_container_width=True
-        )
-
-    with coluna_depois:
-        st.image(
-            resultado,
-            caption="Simulação da reforma",
-            use_container_width=True
-        )
+    st.image(
+        resultado_bytes,
+        caption=f"Simulação em {material}",
+        use_container_width=True
+    )
 
     st.download_button(
-        "Baixar a simulação",
-        data=resultado,
+        "Baixar simulação",
+        data=resultado_bytes,
         file_name="simulacao_roma_estofaria.jpg",
         mime="image/jpeg"
     )
@@ -271,8 +257,7 @@ if "resultado_imagem" in st.session_state:
 
     mensagem = (
         "Olá, Roma Estofaria! Fiz uma simulação de reforma "
-        f"em {tipo_material}, na cor {cor_material}, e gostaria "
-        "de solicitar um orçamento."
+        f"no material {material} e gostaria de solicitar um orçamento."
     )
 
     link_whatsapp = (
@@ -286,6 +271,8 @@ if "resultado_imagem" in st.session_state:
         use_container_width=True
     )
 
-    st.caption(
-        "Baixe a simulação e envie a imagem durante o atendimento pelo WhatsApp."
-    )
+
+st.caption(
+    "Simulação visual aproximada. A tonalidade pode variar conforme "
+    "a iluminação, a tela e o lote do tecido."
+)
