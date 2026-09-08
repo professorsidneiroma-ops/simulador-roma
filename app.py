@@ -50,6 +50,5 @@ if foto_cliente:
     mensagem = f"Olá, Roma Estofaria! Gostaria de um orçamento para reformar meu sofá no material {tipo_material} - Cor: {cor}."
     link_whatsapp = f"https://wa.me/{numero_whatsapp}?text={urllib.parse.quote(mensagem)}" if 'urllib' in globals() else f"https://wa.me/{numero_whatsapp}"
 
-    if st.button("📲 Solicitar Orçamento no WhatsApp", type="primary"):
-        st.markdown(f'<meta http-equiv="refresh" content="0;url=https://wa.me/5541999999999?text=Ola%20Roma%20Estofaria,%20gostaria%20de%20orcamento%20para%20reforma.">', unsafe_allow_html=True)
+    if _html=True)
         st.success("Redirecionando para o WhatsApp da Roma Estofaria...")
